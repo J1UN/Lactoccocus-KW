@@ -1,0 +1,124 @@
+import os
+import argparse
+from Bio.Seq import Seq
+from Bio import SeqIO
+import re
+from Bio.Align import PairwiseAligner
+
+def calculate_identity(seq1, seq2, aligner):
+    alignments = aligner.align(seq1, seq2)
+    best_alignment = alignments[0]
+    aln_str1, aln_str2, matches = reconstruct_alignment(seq1, seq2, best_alignment)
+    aligned_len = len(aln_str1)
+    identity = matches / aligned_len if aligned_len > 0 else 0.0
+    return identity, aln_str1, aln_str2
+
+def reconstruct_alignment(seq1, seq2, alignment):
+    aln1, aln2 = "", ""
+    matches = 0
+    i1, i2 = 0, 0
+    for (start1, end1), (start2, end2) in zip(alignment.aligned[0], alignment.aligned[1]):
+        if start1 > i1:
+            aln1 += seq1[i1:start1]
+            aln2 += "-" * (start1 - i1)
+        if start2 > i2:
+            aln1 += "-" * (start2 - i2)
+            aln2 += seq2[i2:start2]
+        aln1 += seq1[start1:end1]
+        aln2 += seq2[start2:end2]
+        matches += sum(1 for a, b in zip(seq1[start1:end1], seq2[start2:end2]) if a == b)
+        i1, i2 = end1, end2
+    if i1 < len(seq1):
+        aln1 += seq1[i1:]
+        aln2 += "-" * (len(seq1) - i1)
+    if i2 < len(seq2):
+        aln1 += "-" * (len(seq2) - i2)
+        aln2 += seq2[i2:]
+    return aln1, aln2, matches
+
+def find_repeats(seq1_id, seq1, seq2_id, seq2, seq_starts, aligner):
+    window_sizes = range(40, 9, -1)
+    direct_repeats = []
+    detected_positions = set()
+    start1, start2 = seq_starts[seq1_id], seq_starts[seq2_id]
+
+    for size in window_sizes:
+        for i in range(len(seq1) - size + 1):
+            if (seq1_id, i) in detected_positions:
+                continue
+            window = seq1[i:i+size]
+            window_rc = str(Seq(window).reverse_complement())  # Inverted
+            for j in range(len(seq2) - size + 1):
+                if (seq2_id, j) in detected_positions:
+                    continue
+                window2 = seq2[j:j+size]
+                identity, _, _ = calculate_identity(window_rc, window2, aligner)
+                if identity >= 0.9:
+                    pos_1, pos_2 = start1 + i, start2 + j
+                    direct_repeats.append((seq1_id, window, pos_1, seq2_id, window2, pos_2, size, identity))
+                    for k in range(size):
+                        detected_positions.add((seq1_id, i + k))
+                        detected_positions.add((seq2_id, j + k))
+    return direct_repeats
+
+def find_and_save_direct_repeats(input_file, output_file, aligner):
+    sequences, seq_starts = {}, {}
+    with open(input_file, "r") as handle:
+        for record in SeqIO.parse(handle, "fasta"):
+            header = record.id
+            match = re.search(r'_(\d+)_(\d+)$', header)
+            start_position = int(match.group(1)) if match else 1
+            sequences[header] = str(record.seq)
+            seq_starts[header] = start_position
+
+    repeat_records = []
+    seq_ids = list(sequences.keys())
+
+    for idx1, seq1_id in enumerate(seq_ids):
+        seq1 = sequences[seq1_id]
+        for idx2 in range(idx1 + 1, len(seq_ids)):
+            seq2_id = seq_ids[idx2]
+            seq2 = sequences[seq2_id]
+            repeats = find_repeats(seq1_id, seq1, seq2_id, seq2, seq_starts, aligner)
+            repeat_records.extend(repeats)
+
+    with open(output_file, "w") as f:
+        f.write("SeqID1\tRepeat1\tPos1\tSeqID2\tRepeat2\tPos2\tDR_len\tper_match\n")
+        for record in repeat_records:
+            seqid1, dr1, pos1, seqid2, dr2, pos2, dr_length, identity = record
+            line = f"{seqid1}\t{dr1}\t{pos1}\t{seqid2}\t{dr2}\t{pos2}\t{dr_length}\t{identity:.4f}\n"
+            f.write(line)
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Find direct repeats from sequences in input directory."
+    )
+    parser.add_argument(
+        "-i", "--input_dir", default="./input", help="Input directory containing FASTA files"
+    )
+    parser.add_argument(
+        "-o", "--output_dir", default="./output", help="Output directory to store results"
+    )
+    args = parser.parse_args()
+
+    input_dir = args.input_dir
+    output_dir = args.output_dir
+    os.makedirs(output_dir, exist_ok=True)
+
+    # pairwise aligner parameter
+    aligner = PairwiseAligner()
+    aligner.mode = 'global'
+    aligner.match_score = 1
+    aligner.mismatch_score = 0
+    aligner.open_gap_score = 0
+    aligner.extend_gap_score = 0
+
+    # file path
+    for file_name in os.listdir(input_dir):
+        if file_name.endswith((".txt", ".fasta", ".fa")):
+            input_path = os.path.join(input_dir, file_name)
+            output_path = os.path.join(output_dir, file_name.rsplit('.', 1)[0] + ".tsv")
+            find_and_save_direct_repeats(input_path, output_path, aligner)
+
+if __name__ == "__main__":
+    main()
